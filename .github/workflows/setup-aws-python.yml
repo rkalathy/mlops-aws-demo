@@ -1,0 +1,62 @@
+name: Setup AWS and Python Environment
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.9'
+        type: string
+      aws-region:
+        description: 'AWS region'
+        required: false
+        default: 'eu-west-2'
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      S3_BUCKET_NAME:
+        required: true
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    
+    outputs:
+      aws-region: ${{ steps.set-outputs.outputs.aws-region }}
+      s3-bucket: ${{ steps.set-outputs.outputs.s3-bucket }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ inputs.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.aws-region }}
+    
+    - name: Verify AWS credentials
+      run: |
+        aws sts get-caller-identity
+        aws s3 ls s3://${{ secrets.S3_BUCKET_NAME }} || echo "Bucket might not exist yet"
+    
+    - name: Set outputs
+      id: set-outputs
+      run: |
+        echo "aws-region=${{ inputs.aws-region }}" >> $GITHUB_OUTPUT
+        echo "s3-bucket=${{ secrets.S3_BUCKET_NAME }}" >> $GITHUB_OUTPUT

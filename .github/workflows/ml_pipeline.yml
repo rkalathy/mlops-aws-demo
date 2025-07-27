@@ -12,81 +12,178 @@ on:
     branches: [ main ]
     paths:
       - '**.py'
-      - '.github/workflows/ml_pipeline.yml'
+      - '.github/workflows/sagemaker-demo.yml'
 
-  env:
-    AWS_DEFAULT_REGION: eu-west-2
-    SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
-    S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+env:
+  AWS_DEFAULT_REGION: eu-west-2
+  SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+  S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
 
-  jobs:
-    setup:
-      uses: ./.github/workflows/setup-aws-python.yml
-      permissions:
-        id-token: write
-        contents: read
+jobs:
+  setup:
+    uses: ./.github/workflows/setup-aws-python.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      python-version: '3.9'
+      aws-region: eu-west-2
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+
+  demo-execution:
+    needs: setup
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    outputs:
+      cleanup-enabled: ${{ steps.set-cleanup.outputs.cleanup-enabled }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-        aws-region: eu-west-2
-      secrets:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
-    training: 
-      needs: setup
-      runs-on: ubuntu-latest
-      
-      permissions:
-        id-token: write
-        contents: read
-      
-      outputs:
-        cleanup-enabled: ${{ steps.set-cleanup.outputs.cleanup-enabled }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_DEFAULT_REGION }}
+    
+    - name: Set cleanup environment variable
+      id: set-cleanup
+      run: |
+        if [ "${{ github.event.inputs.cleanup_after_demo }}" = "true" ]; then
+          echo "CLEANUP_AFTER_DEMO=true" >> $GITHUB_ENV
+          echo "cleanup-enabled=true" >> $GITHUB_OUTPUT
+        else
+          echo "CLEANUP_AFTER_DEMO=false" >> $GITHUB_ENV
+          echo "cleanup-enabled=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Run SageMaker Demo
+      run: |
+        echo "Starting SageMaker MLOps Demo with MLflow tracking..."
+        python sagemaker_demo.py
+    
+    - name: Upload artifacts from demo
+      uses: actions/upload-artifact@v4
+      with:
+        name: demo-outputs
+        path: |
+          mlruns/
+          data/
+          *.log
+          *.json
+        retention-days: 1
+
+  reporting:
+    needs: demo-execution
+    runs-on: ubuntu-latest
+    if: always()
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download artifacts from demo
+      uses: actions/download-artifact@v4
+      with:
+        name: demo-outputs
+        path: .
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_DEFAULT_REGION }}
+    
+    - name: Generate MLflow Report
+      run: |
+        echo "Generating MLflow experiment summary..."
+        python generate_mlflow_report.py
+    
+    - name: Upload MLflow Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mlflow-experiments
+        path: |
+          mlruns/
+          mlflow_report.json
+        retention-days: 30
+        if-no-files-found: warn
+    
+    - name: Upload Demo Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: demo-artifacts
+        path: |
+          data/
+          *.log
+          *.json
+        retention-days: 7
+        if-no-files-found: warn
+    
+    - name: Demo Summary
+      run: |
+        echo "## 🚀 SageMaker MLOps Demo Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Region**: ${{ env.AWS_DEFAULT_REGION }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **S3 Bucket**: ${{ env.S3_BUCKET_NAME }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Cleanup enabled**: ${{ needs.demo-execution.outputs.cleanup-enabled }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         
-      steps:
-        - name: Checkout code
-          uses: actions/checkout@v4
+        # Data creation status
+        if [ -f "data/train.csv" ]; then
+          echo "✅ Sample data created successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Sample data creation failed" >> $GITHUB_STEP_SUMMARY
+        fi
         
-        - name: Set up Python
-          uses: actions/setup-python@v4
-          with:
-            python-version: '3.9'
+        # MLflow experiments status
+        if [ -d "mlruns" ]; then
+          echo "✅ MLflow experiments tracked" >> $GITHUB_STEP_SUMMARY
+          if [ -f "mlflow_report.json" ]; then
+            TOTAL_RUNS=$(python -c "import json; print(json.load(open('mlflow_report.json'))['total_runs'])" 2>/dev/null || echo "0")
+            echo "📊 **MLflow Runs**: $TOTAL_RUNS experiments tracked" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "❌ No MLflow experiments found" >> $GITHUB_STEP_SUMMARY
+        fi
         
-        - name: Install dependencies
-          run: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-        
-        - name: Configure AWS credentials
-          uses: aws-actions/configure-aws-credentials@v4
-          with:
-            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            aws-region: ${{ env.AWS_DEFAULT_REGION }}
-        
-        - name: Set cleanup environment variable
-          id: set-cleanup
-          run: |
-            if [ "${{ github.event.inputs.cleanup_after_demo }}" = "true" ]; then
-              echo "CLEANUP_AFTER_DEMO=true" >> $GITHUB_ENV
-              echo "cleanup-enabled=true" >> $GITHUB_OUTPUT
-            else
-              echo "CLEANUP_AFTER_DEMO=false" >> $GITHUB_ENV
-              echo "cleanup-enabled=false" >> $GITHUB_OUTPUT
-            fi
-        
-        - name: Run SageMaker Demo
-          run: |
-            echo "Starting SageMaker MLOps Demo with MLflow tracking..."
-            python sagemaker_demo.py
-        
-        - name: Upload artifacts from demo
-          uses: actions/upload-artifact@v4
-          with:
-            name: demo-outputs
-            path: |
-              mlruns/
-              data/
-              *.log
-              *.json
-            retention-days: 1
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Artifacts Available" >> $GITHUB_STEP_SUMMARY
+        echo "- **mlflow-experiments**: Complete MLflow experiment data and reports" >> $GITHUB_STEP_SUMMARY
+        echo "- **demo-artifacts**: Sample data, logs, and other demo outputs" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Download artifacts from the 'Summary' tab to explore experiment results locally." >> $GITHUB_STEP_SUMMARY
