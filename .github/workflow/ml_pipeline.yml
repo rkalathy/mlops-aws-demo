@@ -1,0 +1,92 @@
+name: SageMaker MLOps Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      cleanup_after_demo:
+        description: 'Clean up resources after demo'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [ main ]
+    paths:
+      - '**.py'
+      - '.github/workflows/ml_pipeline.yml'
+
+  env:
+    AWS_DEFAULT_REGION: eu-west-2
+    SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+    S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+
+  jobs:
+    setup:
+      uses: ./.github/workflows/setup-aws-python.yml
+      permissions:
+        id-token: write
+        contents: read
+      with:
+        python-version: '3.9'
+        aws-region: eu-west-2
+      secrets:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+    training: 
+      needs: setup
+      runs-on: ubuntu-latest
+      
+      permissions:
+        id-token: write
+        contents: read
+      
+      outputs:
+        cleanup-enabled: ${{ steps.set-cleanup.outputs.cleanup-enabled }}
+        
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+        
+        - name: Set up Python
+          uses: actions/setup-python@v4
+          with:
+            python-version: '3.9'
+        
+        - name: Install dependencies
+          run: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+        
+        - name: Configure AWS credentials
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: ${{ env.AWS_DEFAULT_REGION }}
+        
+        - name: Set cleanup environment variable
+          id: set-cleanup
+          run: |
+            if [ "${{ github.event.inputs.cleanup_after_demo }}" = "true" ]; then
+              echo "CLEANUP_AFTER_DEMO=true" >> $GITHUB_ENV
+              echo "cleanup-enabled=true" >> $GITHUB_OUTPUT
+            else
+              echo "CLEANUP_AFTER_DEMO=false" >> $GITHUB_ENV
+              echo "cleanup-enabled=false" >> $GITHUB_OUTPUT
+            fi
+        
+        - name: Run SageMaker Demo
+          run: |
+            echo "Starting SageMaker MLOps Demo with MLflow tracking..."
+            python sagemaker_demo.py
+        
+        - name: Upload artifacts from demo
+          uses: actions/upload-artifact@v4
+          with:
+            name: demo-outputs
+            path: |
+              mlruns/
+              data/
+              *.log
+              *.json
+            retention-days: 1
