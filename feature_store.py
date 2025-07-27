@@ -162,6 +162,128 @@ class MLOpsFeatureStore:
             print(f"Error retrieving training data: {e}")
             return None
     
+    def get_drift_monitoring_data(self, feature_group_name, start_time=None, end_time=None):
+        """Retrieve data for drift monitoring from feature store"""
+        try:
+            from datetime import datetime, timedelta
+            
+            # Default to last 7 days if no time range specified
+            if not end_time:
+                end_time = datetime.now()
+            if not start_time:
+                start_time = end_time - timedelta(days=7)
+            
+            # Convert to timestamp for filtering
+            start_timestamp = start_time.timestamp()
+            end_timestamp = end_time.timestamp()
+            
+            # Build query with time filter
+            query = f"""
+            SELECT * FROM "{feature_group_name}"
+            WHERE event_time >= {start_timestamp} AND event_time <= {end_timestamp}
+            ORDER BY event_time DESC
+            """
+            
+            print(f"Querying drift monitoring data from {start_time} to {end_time}")
+            
+            # For now, return the offline store path
+            # In production, you would execute the Athena query and return results
+            s3_path = f's3://{self.bucket_name}/feature-store/{feature_group_name}/offline'
+            print(f"Drift monitoring data available at: {s3_path}")
+            
+            return s3_path
+            
+        except Exception as e:
+            print(f"Error retrieving drift monitoring data: {e}")
+            return None
+    
+    def store_drift_metrics(self, drift_results, feature_group_name=None):
+        """Store drift monitoring results in feature store"""
+        try:
+            import pandas as pd
+            import time
+            
+            if not feature_group_name:
+                feature_group_name = 'mlops-demo-drift-metrics'
+            
+            # Create feature definitions for drift metrics
+            drift_feature_definitions = [
+                FeatureDefinition(feature_name='feature_name', feature_type=FeatureTypeEnum.STRING),
+                FeatureDefinition(feature_name='ks_statistic', feature_type=FeatureTypeEnum.FRACTIONAL),
+                FeatureDefinition(feature_name='ks_p_value', feature_type=FeatureTypeEnum.FRACTIONAL),
+                FeatureDefinition(feature_name='psi_score', feature_type=FeatureTypeEnum.FRACTIONAL),
+                FeatureDefinition(feature_name='mean_drift', feature_type=FeatureTypeEnum.FRACTIONAL),
+                FeatureDefinition(feature_name='drift_detected', feature_type=FeatureTypeEnum.STRING),
+                FeatureDefinition(feature_name='drift_severity', feature_type=FeatureTypeEnum.STRING),
+                FeatureDefinition(feature_name='record_id', feature_type=FeatureTypeEnum.STRING),
+                FeatureDefinition(feature_name='event_time', feature_type=FeatureTypeEnum.FRACTIONAL),
+                FeatureDefinition(feature_name='monitoring_run_id', feature_type=FeatureTypeEnum.STRING)
+            ]
+            
+            # Create drift metrics feature group
+            try:
+                drift_feature_group = self.create_feature_group(
+                    feature_group_name=feature_group_name,
+                    feature_definitions=drift_feature_definitions,
+                    record_identifier_name='record_id',
+                    event_time_name='event_time'
+                )
+            except Exception as e:
+                if "already exists" in str(e):
+                    drift_feature_group = FeatureGroup(
+                        name=feature_group_name,
+                        sagemaker_session=self.session
+                    )
+                else:
+                    raise e
+            
+            # Convert drift results to DataFrame
+            drift_data = []
+            monitoring_run_id = f"drift_run_{int(time.time())}"
+            current_time = time.time()
+            
+            for feature_name, metrics in drift_results.items():
+                if feature_name.startswith('feature_'):
+                    drift_data.append({
+                        'feature_name': feature_name,
+                        'ks_statistic': metrics.get('ks_statistic', 0.0),
+                        'ks_p_value': metrics.get('ks_p_value', 1.0),
+                        'psi_score': metrics.get('psi_score', 0.0),
+                        'mean_drift': metrics.get('mean_drift', 0.0),
+                        'drift_detected': str(metrics.get('drift_detected', False)),
+                        'drift_severity': self._classify_drift_severity(metrics),
+                        'record_id': f"{feature_name}_{monitoring_run_id}",
+                        'event_time': current_time,
+                        'monitoring_run_id': monitoring_run_id
+                    })
+            
+            if drift_data:
+                drift_df = pd.DataFrame(drift_data)
+                
+                # Ingest drift metrics into feature store
+                drift_feature_group.ingest(data_frame=drift_df, max_workers=3, wait=True)
+                print(f"Stored {len(drift_data)} drift metrics in feature store: {feature_group_name}")
+                
+                return feature_group_name
+            
+        except Exception as e:
+            print(f"Error storing drift metrics in feature store: {e}")
+            return None
+    
+    def _classify_drift_severity(self, metrics):
+        """Classify drift severity based on metrics"""
+        psi_score = metrics.get('psi_score', 0)
+        mean_drift = metrics.get('mean_drift', 0)
+        
+        if psi_score > 0.5 or mean_drift > 0.5:
+            return 'HIGH'
+        elif psi_score > 0.2 or mean_drift > 0.2:
+            return 'MEDIUM'
+        elif psi_score > 0.1 or mean_drift > 0.1:
+            return 'LOW'
+        else:
+            return 'NONE'
+    
     def get_online_features(self, feature_group_name, record_ids):
         """Retrieve features for online inference"""
         try:
