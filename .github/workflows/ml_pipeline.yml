@@ -8,6 +8,16 @@ on:
         required: false
         default: true
         type: boolean
+      use_persistent_endpoint:
+        description: 'Use persistent endpoint for reuse'
+        required: false
+        default: false
+        type: boolean
+      create_persistent_endpoint:
+        description: 'Create persistent endpoint for future reuse'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [ main ]
     paths:
@@ -79,7 +89,20 @@ jobs:
     - name: Run SageMaker Demo
       run: |
         echo "Starting SageMaker MLOps Demo with MLflow tracking..."
-        python sagemaker_demo.py
+        
+        # Build command with endpoint options
+        CMD="python sagemaker_demo.py"
+        
+        if [ "${{ github.event.inputs.create_persistent_endpoint }}" = "true" ]; then
+          CMD="$CMD --create-persistent-endpoint"
+          echo "Creating persistent endpoint for reuse"
+        elif [ "${{ github.event.inputs.use_persistent_endpoint }}" = "true" ]; then
+          CMD="$CMD --use-persistent-endpoint"
+          echo "Using persistent endpoint if available"
+        fi
+        
+        echo "Command: $CMD"
+        $CMD
     
     - name: Upload artifacts from demo
       uses: actions/upload-artifact@v4
@@ -161,6 +184,8 @@ jobs:
         echo "- **Region**: ${{ env.AWS_DEFAULT_REGION }}" >> $GITHUB_STEP_SUMMARY
         echo "- **S3 Bucket**: ${{ env.S3_BUCKET_NAME }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Cleanup enabled**: ${{ needs.demo-execution.outputs.cleanup-enabled }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Endpoint reuse**: ${{ github.event.inputs.use_persistent_endpoint || 'false' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Create persistent endpoint**: ${{ github.event.inputs.create_persistent_endpoint || 'false' }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # Data creation status
