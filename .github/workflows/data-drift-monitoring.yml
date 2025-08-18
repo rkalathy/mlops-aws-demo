@@ -3,7 +3,7 @@ name: Data Drift Monitoring
 on:
   schedule:
     # Run every day at 2 AM UTC
-    - cron: '0 2 * * *'
+    # - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       drift_type:
